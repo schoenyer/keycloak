@@ -25,7 +25,10 @@ to start.
 `DOMAIN_REALM` let's you specify a custom realm. Be aware that when specifying a
 custom realm you also need to specify `DOMAIN_ADMINNAME` and `DOMAIN_ADMINPASSWORD`.
 
-## Identity Providers
+## Identity Providers
+
+Currently Google and Facebook are supported as Social Media Identity Providers.
+You can configure them with the env variables described above.
 
 ## Login Theme
 
