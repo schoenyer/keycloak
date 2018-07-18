@@ -421,9 +421,15 @@ doEvery(30*time.Second, func(){
   	}
   _, clients := getClientsforRealm(apiUrl,toBeConfiguredRealm,user,password, token)
   for _, client := range clients {
-    	fmt.Println("Updating Client:", client.ClientID)
+    fmt.Println("Updating Client:", client.ClientID)
     adaptClientDefaults(apiUrl,toBeConfiguredRealm, client, token)
-    setMappersForClient(apiUrl,toBeConfiguredRealm, client.ClientID, token)
+    setMapperForClient(apiUrl,toBeConfiguredRealm, client.ClientID,"UsertypeMapper","Type","type", token)
+    token, err := getBearerToken(apiUrl, user, password)
+    if err != nil {
+      fmt.Println(err)
+    }
+    setMapperForClient(apiUrl,toBeConfiguredRealm, client.ClientID,"CompanyMapper","CompanyId","company", token)
+    setMapperForClient(apiUrl,toBeConfiguredRealm, client.ClientID,"RolesMapper","Roles","roles", token)
 }})
 
 
@@ -505,48 +511,40 @@ func getClientsforRealm(apiUrl, realm, user,password string,  t BearerToken) (er
 
 }
 
-func setMappersForClient(apiUrl, realm, client  string, t BearerToken) (err error) {
-  userTypemapper := &Mapper{Name: "UserTypeMapper", Protocol: "openid-connect", Config: MapperConf{IDTokenClaim: "true",
+func setMapperForClient(apiUrl, realm, client, mapperName, keycloakUserAttributeName, tokenAttributeName  string, t BearerToken) (err error) {
+
+  clienturl :=  apiUrl + "/auth/admin/realms/" + realm + "/clients/" + client + "/protocol-mappers/models"
+
+  mapper := &Mapper{Name: mapperName, Protocol: "openid-connect", Config: MapperConf{IDTokenClaim: "true",
 		AccessTokenClaim: "true",
 		UserinfoTokenClaim: "true",
-		UserAttribute: "Type",
-		ClaimName: "type",
+		UserAttribute: keycloakUserAttributeName,
+		ClaimName: tokenAttributeName,
 		JSONTypeLabel: "String",
 		Multivalued: ""} ,
     ProtocolMapper: "oidc-usermodel-attribute-mapper"}
-  mt, err := json.Marshal(userTypemapper)
-  companyIdmapper := &Mapper{Name: "CompanyId", Protocol: "openid-connect", Config: MapperConf{IDTokenClaim: "true",
-    AccessTokenClaim: "true",
-    UserinfoTokenClaim: "true",
-    UserAttribute: "CompanyId",
-    ClaimName: "company",
-    JSONTypeLabel: "String",
-    Multivalued: ""} ,
-    ProtocolMapper: "oidc-usermodel-attribute-mapper"}
-  cm, err := json.Marshal(companyIdmapper)
-	clienturl :=  apiUrl + "/auth/admin/realms/" + realm + "/clients/" + client + "/protocol-mappers/models"
-	reqType, err := http.NewRequest("POST", clienturl, bytes.NewReader(mt))
-	reqType.Header.Set("Content-Type", "application/json")
-	reqType.Header.Set("Authorization", "bearer "+t.AccessToken)
+  m, err := json.Marshal(mapper)
+  if err != nil {
+    fmt.Println("Error occured when marshalling request body for attribute mapper of client", client, ": ", err)
+    return
+  }
 
-  reqCompany, err := http.NewRequest("POST", clienturl, bytes.NewReader(cm))
-  reqCompany.Header.Set("Content-Type", "application/json")
-  reqCompany.Header.Set("Authorization", "bearer "+t.AccessToken)
+	req, err := http.NewRequest("POST", clienturl, bytes.NewReader(m))
+  if err != nil {
+    fmt.Println("Error occured when constructing request for attribute mapper of client", client, ": ", err)
+    return
+  }
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "bearer "+t.AccessToken)
 
 	httpClient := &http.Client{}
-	resp, err := httpClient.Do(reqType)
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		fmt.Println("Keycloak REST POST clients error: ", err)
+		fmt.Println("Request to set Attribute Mapper for client", client, " wasn't successful, error: ", err, " (response --> ", resp, ")")
 		return
 	}
 	defer resp.Body.Close()
-
-  respcompany, err := httpClient.Do(reqCompany)
-	if err != nil {
-		fmt.Println("Keycloak REST POST clients error: ", err)
-		return
-	}
-	defer respcompany.Body.Close()
 
 	return
 
