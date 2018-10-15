@@ -4,14 +4,13 @@ import (
   //"github.com/docopt/docopt.go"
   "os"
   "encoding/json"
-	"fmt"
-	"log"
 	"net/http"
 	"net/url"
   "strings"
   "errors"
   "bytes"
-  	"time"
+  "time"
+  "github.com/sirupsen/logrus"
 )
 
 // const usage = `
@@ -325,12 +324,28 @@ type SmtpConfig struct {
 
 func main() {
 
+  //// LOG SPECIFIC INIT ////
+  logger := logrus.New()
+  logger.SetFormatter(&logrus.TextFormatter{})
+
+  debugLogLevel := os.Getenv("CONFIGURATOR_DEBUGLEVEL")
+  if debugLogLevel == "true" {
+    logger.SetLevel(logrus.DebugLevel)
+  } else {
+    logger.SetLevel(logrus.InfoLevel)
+  }
+
+  log := logger.WithFields(logrus.Fields{"component":"schoenyer.keycloak.configurator"})
+  ///////////////////////////
+
   apiUrl    := "http://localhost:8080"
+
+  log.info("Configurator started.")
 
   user      := "admin"
   password  := os.Getenv("KEYCLOAK_PASSWORD")
   if password == "" {
-    panic("KEYCLOAK_PASSWORD not set. Exit.")
+    log.Fatal("Env KEYCLOAK_PASSWORD is not set, will exit.")
   }
   trusted   := []string{os.Getenv("KEYCLOAK_TRUSTED")}
   if len(trusted) == 0 {
@@ -364,73 +379,91 @@ func main() {
 
   toBeConfiguredRealm := "master"
 
+  clientConfigurationInterval := 30
+  // clientConfigurationInterval := os.Getenv("CLIENT_CONFIGURATION_INTERVAL")
+  // if len(clientConfigurationInterval) == 0 {
+  //   clientConfigurationInterval := 30
+  //   log.WithField("interval",clientConfigurationInterval).Info("Length of interval (in seconds) in which clients are configured wasn't set, will use default interval.")
+  // }else{
+  //   clientConfigurationInterval := 30   // TODO: Check if really an int value
+  //   log.WithField("interval",clientConfigurationInterval).Debug("Length of interval (in seconds) in which clients are configured was set.")
+  // }
+
   if len(domainRealm) != 0 &&
      len(adminName) != 0 &&
      len(adminPassword) != 0 {
 
      toBeConfiguredRealm = domainRealm
-     _, err := registerRealm(apiUrl, user, password, domainRealm, adminName, adminPassword)
+     _, err := registerRealm(apiUrl, user, password, domainRealm, adminName, adminPassword, log)
      if err != nil {
-       fmt.Println("There was an error when registering custom realm ",domainRealm," : ",err)
+       log.WithFields(logrus.Fields{"realm":domainRealm, "error": err}).Fatal("There was an error when registering custom realm.")
        panic("Error when registering realm, will exit.")
      }
   } else {
-    fmt.Println("Won't register custom realm because one of the three required parameters was not specified: DOMAIN_REALM(",domainRealm,") DOMAIN_ADMINNAME(",adminName,") DOMAIN_ADMINPASSWORD(",adminPassword,")")
+    log.WithFields(logrus.Fields{"DOMAIN_REALM":domainRealm,"DOMAIN_ADMINNAME":adminName,"DOMAIN_ADMINPASSWORD":adminPassword}).Warning("Won't register custom realm because one of the three required parameters was not specified.")
   }
 
-  token, err := getBearerToken(apiUrl, user, password)
+  token, err := getBearerToken(apiUrl, user, password, log)
   if err != nil {
-    fmt.Println("Couldn't fetch token to do some initial configuration: ",err)
+    log.WithField("error",err).Error("Couldn't fetch token to do some initial configuration.")
   } else {
     if len(facebookClientId) != 0 &&
        len(facebookClientSecret) != 0 {
-         registerFacebookIdentityProvider(apiUrl, toBeConfiguredRealm, facebookClientId, facebookClientSecret, token)
+         registerFacebookIdentityProvider(apiUrl, toBeConfiguredRealm, facebookClientId, facebookClientSecret, token, log)
     }
     if len(googleClientId) != 0 &&
        len(googleClientSecret) != 0 {
-          registerGoogleIdentityProvider(apiUrl, toBeConfiguredRealm, googleClientId, googleClientSecret, token)
+          registerGoogleIdentityProvider(apiUrl, toBeConfiguredRealm, googleClientId, googleClientSecret, token, log)
     }
     if len(smtpHost) != 0 && len(smtpPort) != 0 && len(smtpUser) != 0 && len(smtpPassword) != 0 && len(smtpFromEmail) != 0 {
-      enableSmtp(apiUrl, toBeConfiguredRealm, smtpHost, smtpPort, smtpUser, smtpPassword, smtpFromEmail, smtpFromDisplay, smtpReplyEmail, smtpReplyDisplay, token)
+      enableSmtp(apiUrl, toBeConfiguredRealm, smtpHost, smtpPort, smtpUser, smtpPassword, smtpFromEmail, smtpFromDisplay, smtpReplyEmail, smtpReplyDisplay, token, log)
     }
     if len(shouldLoginInternationalisationBeEnabled) != 0 {
-      enableLoginInternationalisation(apiUrl, toBeConfiguredRealm, availableLoginLocales, token)
+      enableLoginInternationalisation(apiUrl, toBeConfiguredRealm, availableLoginLocales, token, log)
     }
   }
 
-  c, err := getComponents(apiUrl,toBeConfiguredRealm,user,password)
+  c, err := getComponents(apiUrl,toBeConfiguredRealm,user,password, log)
   if err != nil {
-    fmt.Println(err)
+    log.WithField("realm",toBeConfiguredRealm).Error("Couldn't fetch keycloak components of realm for initial configuration.")
   } else {
-    fmt.Println("Will manipulate trusted hosts policy...")
-    trustedhost_response,trustedhost_err := addTrustedHost(apiUrl,toBeConfiguredRealm,user,password,c,hostSendingRegistrationRequestMustMatch,clientUrisMustMatch,trusted)
+    log.Info("Will manipulate trusted hosts policy...")
+    trustedhost_response,trustedhost_err := addTrustedHost(apiUrl,toBeConfiguredRealm,user,password,c,hostSendingRegistrationRequestMustMatch,clientUrisMustMatch,trusted,log)
     if err != nil {
-      fmt.Println(trustedhost_err)
+      log.WithField("error",trustedhost_err).Error("An error occured when manipulating trusted host policy.")
     } else {
-      fmt.Println("Response from trusted host manipulation request: " + trustedhost_response.Status)
+      // TODO: Analyse response whether it was successful or not.
+      log.WithField("response",trustedhost_response.Status).Info("Got a response from manipulating trusted host policy.")
     }
-    fmt.Println("Will delete consent required policy...")
-    deleteConsentRequiredPolicy(apiUrl,toBeConfiguredRealm,user,password,c)
+    log.Info("Will delete consent required policy...")
+    deleteConsentRequiredPolicy(apiUrl,toBeConfiguredRealm,user,password,c, log)
   }
 
-doEvery(30*time.Second, func(){
-
-    token, err := getBearerToken(apiUrl, user, password)
+doEvery(time.Duration(clientConfigurationInterval)*time.Second, func(){
+  token, err := getBearerToken(apiUrl, user, password, log)
+  if err != nil {
+		log.WithField("interval",clientConfigurationInterval).Error("Couldn't fetch bearer token thus won't be able to configure clients, will retry in set interval.")
+	} else {
+    err, clients := getClientsforRealm(apiUrl,toBeConfiguredRealm,user,password, token, log)
     if err != nil {
-  		fmt.Println(err)
-  	}
-  _, clients := getClientsforRealm(apiUrl,toBeConfiguredRealm,user,password, token)
-  for _, client := range clients {
-    fmt.Println("Updating Client:", client.ClientID)
-    adaptClientDefaults(apiUrl,toBeConfiguredRealm, client, token)
-    setMapperForClient(apiUrl,toBeConfiguredRealm, client.ClientID,"UsertypeMapper","Type","type", token)
-    token, err := getBearerToken(apiUrl, user, password)
-    if err != nil {
-      fmt.Println(err)
+      log.WithField("interval",clientConfigurationInterval).WithField("realm",toBeConfiguredRealm).Error("Wasn't able to fetch clients of realm, will retry in set interval.")
+    } else {
+      log.WithField("realm",toBeConfiguredRealm).Info("Will update Clients of specified Realm.")
+      for _, client := range clients {
+        token, err := getBearerToken(apiUrl, user, password, log)
+        if err != nil {
+          log.WithField("client",client.ClientID).Error("An error occured when fetching Bearer Token needed to update client. Will skip client until next configuration interval.")
+        } else {
+          log.WithField("client",client.ClientID).Debug("Updating client.")
+          adaptClientDefaults(apiUrl,toBeConfiguredRealm, client, token, log)
+          setMapperForClient(apiUrl,toBeConfiguredRealm, client.ClientID,"UsertypeMapper","Type","type", token, log)
+          setMapperForClient(apiUrl,toBeConfiguredRealm, client.ClientID,"CompanyMapper","CompanyId","company", token, log)
+          setMapperForClient(apiUrl,toBeConfiguredRealm, client.ClientID,"RolesMapper","Roles","roles", token, log)
+        }
+      }
     }
-    setMapperForClient(apiUrl,toBeConfiguredRealm, client.ClientID,"CompanyMapper","CompanyId","company", token)
-    setMapperForClient(apiUrl,toBeConfiguredRealm, client.ClientID,"RolesMapper","Roles","roles", token)
-}})
+  }
+})
 
 
 }
@@ -442,13 +475,14 @@ func doEvery(d time.Duration, f func()) {
 	}
 }
 
-func getBearerToken(apiUrl,user ,password string)(token BearerToken, err error) {
+func getBearerToken(apiUrl,user ,password string, log *logrus.Entry)(token BearerToken, err error) {
 
   client := &http.Client{}
 
   resource := "/auth/realms/master/protocol/openid-connect/token"
   u, err := url.ParseRequestURI(apiUrl)
   if err != nil {
+    log.WithField("error",err).WithField("url",apiUrl).Error("An error occurred when preparing the url to fetch the bearer token.")
 		return
 	}
   u.Path = resource
@@ -461,34 +495,36 @@ func getBearerToken(apiUrl,user ,password string)(token BearerToken, err error) 
 
   req, err := http.NewRequest("POST", u.String(), strings.NewReader(form.Encode()))
 	if err != nil {
+    log.WithField("error",err).Error("An error occurred when creating request to fetch bearer token.")
 		return
 	}
   req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
   resp, err := client.Do(req)
 	if err != nil {
+    log.WithField("error",err).Error("An error occurred when fetching the bearer token.")
 		return
 	}
 
   defer resp.Body.Close()
 
   if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
-		log.Println(err)
+		log.WithField("error",err).Error("An error occurred when decoding the received bearer token.")
 	}
 
   return
 }
 
 
-func getClientsforRealm(apiUrl, realm, user,password string,  t BearerToken) (err error, clients []Client) {
-	fmt.Println("Getting clients for realm ", realm)
-
+func getClientsforRealm(apiUrl, realm, user,password string,  t BearerToken, log *logrus.Entry) (err error, clients []Client) {
 
 	keycloakgeturl :=  apiUrl + "/auth/admin/realms/" + realm + "/clients"
-	fmt.Println("URL:>", keycloakgeturl)
+
+  log.WithField("url",keycloakgeturl).Debug("Attempting to fetch clients of configured realm from rest api url.")
+
 	req, err := http.NewRequest("GET", keycloakgeturl, nil)
   if err != nil {
-		fmt.Println("Got an error when building request: ", err)
+		log.WithField("error",err).WithField("realm", realm).Error("Faced an error when building request to fetch available clients on realm.")
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -497,21 +533,20 @@ func getClientsforRealm(apiUrl, realm, user,password string,  t BearerToken) (er
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Println("Keycloak REST GET clients error: ", err)
+		log.WithField("error",err).WithField("realm", realm).Error("Run into an error when triggering call to fetch clients of realm.")
 		return
 	}
 
   if err := json.NewDecoder(resp.Body).Decode(&clients); err != nil {
-		fmt.Println("Keycloak REST json clients unmarshal error: ", err)
+		log.WithField("error",err).WithField("realm", realm).Error("Couldn't process response from request to fetch clients of realm.")
 	}
 
   defer resp.Body.Close()
 
 	return nil, clients
-
 }
 
-func setMapperForClient(apiUrl, realm, client, mapperName, keycloakUserAttributeName, tokenAttributeName  string, t BearerToken) (err error) {
+func setMapperForClient(apiUrl, realm, client, mapperName, keycloakUserAttributeName, tokenAttributeName  string, t BearerToken, log *logrus.Entry) (err error) {
 
   clienturl :=  apiUrl + "/auth/admin/realms/" + realm + "/clients/" + client + "/protocol-mappers/models"
 
@@ -525,13 +560,13 @@ func setMapperForClient(apiUrl, realm, client, mapperName, keycloakUserAttribute
     ProtocolMapper: "oidc-usermodel-attribute-mapper"}
   m, err := json.Marshal(mapper)
   if err != nil {
-    fmt.Println("Error occured when marshalling request body for attribute mapper of client", client, ": ", err)
+    log.WithField("error",err).WithField("realm", realm).WithField("client", client).Error("Error occured when marshalling request body for attribute mapper of client.")
     return
   }
 
 	req, err := http.NewRequest("POST", clienturl, bytes.NewReader(m))
   if err != nil {
-    fmt.Println("Error occured when constructing request for attribute mapper of client", client, ": ", err)
+    log.WithField("error",err).WithField("realm", realm).WithField("client", client).Error("Error occured when constructing request for attribute mapper of client.")
     return
   }
 	req.Header.Set("Content-Type", "application/json")
@@ -541,7 +576,7 @@ func setMapperForClient(apiUrl, realm, client, mapperName, keycloakUserAttribute
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		fmt.Println("Request to set Attribute Mapper for client", client, " wasn't successful, error: ", err, " (response --> ", resp, ")")
+		log.WithField("error",err).WithField("realm", realm).WithField("client", client).Error("Request to set Attribute Mapper for client wasn't successful, got an error.")
 		return
 	}
 	defer resp.Body.Close()
@@ -551,9 +586,9 @@ func setMapperForClient(apiUrl, realm, client, mapperName, keycloakUserAttribute
 }
 
 
-func getComponents(apiUrl,realm,user,password string)(components []Component, err error){
-  // only call if token expired...
-  t, err := getBearerToken(apiUrl,user,password)
+func getComponents(apiUrl,realm,user,password string, log *logrus.Entry)(components []Component, err error){
+  // TODO: Only call if token expired...
+  t, err := getBearerToken(apiUrl,user,password,log)
   if err != nil {
 		return
 	}
@@ -563,12 +598,14 @@ func getComponents(apiUrl,realm,user,password string)(components []Component, er
   resource := "/auth/admin/realms/" + realm + "/components"
   u, err := url.ParseRequestURI(apiUrl)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when parsing request uri used to get components for realm.")
 		return
 	}
   u.Path = resource
 
   req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when creating http request to get components for realm.")
 		return
 	}
   req.Header.Add("Accept", "application/json")
@@ -576,6 +613,7 @@ func getComponents(apiUrl,realm,user,password string)(components []Component, er
 
   resp, err := client.Do(req)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when triggering http request to get components for realm.")
 		return
 	}
 
@@ -583,15 +621,16 @@ func getComponents(apiUrl,realm,user,password string)(components []Component, er
 
   err = json.NewDecoder(resp.Body).Decode(&components)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when decoding the response of the http request used to get components for realm.")
 		return
 	}
 
   return
 }
 
-func deleteComponent(apiUrl,realm,user,password,componentId string)(resp *http.Response, err error){
-  // only call if token expired...
-  t, err := getBearerToken(apiUrl,user,password)
+func deleteComponent(apiUrl,realm,user,password,componentId string, log *logrus.Entry)(resp *http.Response, err error){
+  // TODO: only call if token expired...
+  t, err := getBearerToken(apiUrl,user,password, log)
   if err != nil {
 		return
 	}
@@ -601,12 +640,14 @@ func deleteComponent(apiUrl,realm,user,password,componentId string)(resp *http.R
   resource := "/auth/admin/realms/" + realm + "/components/" + componentId
   u, err := url.ParseRequestURI(apiUrl)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when parsing request uri used to delete components for realm.")
 		return
 	}
   u.Path = resource
 
   req, err := http.NewRequest("DELETE", u.String(), nil)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when creating http request to delete components for realm.")
 		return
 	}
   req.Header.Add("Accept", "application/json")
@@ -614,6 +655,7 @@ func deleteComponent(apiUrl,realm,user,password,componentId string)(resp *http.R
 
   resp, err = client.Do(req)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when triggering http request to delete components for realm.")
 		return
 	}
 
@@ -622,11 +664,12 @@ func deleteComponent(apiUrl,realm,user,password,componentId string)(resp *http.R
   return
 }
 
-func registerAdminUser(apiUrl,realm,adminuser,adminpassword string, t BearerToken)(err error){
+func registerAdminUser(apiUrl,realm,adminuser,adminpassword string, t BearerToken, log *logrus.Entry)(err error){
   client := &http.Client{}
   resource := "/auth/admin/realms/" + realm + "/users"
   u, err := url.ParseRequestURI(apiUrl)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when parsing request uri used to register admin user for realm.")
 		return
 	}
 
@@ -636,31 +679,36 @@ func registerAdminUser(apiUrl,realm,adminuser,adminpassword string, t BearerToke
   user := &User{ Username: adminuser, Enabled: true, Credentials: []UserCredentials{UserCredentials{ Value: adminpassword, Type: "password"}},
                 ClientRoles: mapp}
   userJson, err := json.Marshal(user)
+  if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("adminuser",adminuser).Error("There was an error when marshalling user json object used to register admin user for realm.")
+    return
+  }
 
-  fmt.Println(string(userJson))
   req, err := http.NewRequest("POST", u.String(), bytes.NewReader(userJson))
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("adminuser",adminuser).WithField("adminObject",userJson).Error("There was an error when creating http request to register admin user for realm.")
 		return
 	}
+
   req.Header.Add("Accept", "application/json")
   req.Header.Add("Authorization","Bearer " + t.AccessToken)
   req.Header.Add("Content-Type", "application/json;charset=UTF-8")
 
   resp, err := client.Do(req)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("adminuser",adminuser).Error("There was an error when triggering http request to register admin user for realm.")
 		return
 	}
   defer resp.Body.Close()
 
-  //println("i got a:", resp.Status, " when trying to create the admin user for domain:", realm)
-
-  d, err := getUserDetails(apiUrl,realm,adminuser,t)
+  d, err := getUserDetails(apiUrl,realm,adminuser,t, log)
   if err != nil {
+    log.WithField("realm", realm).WithField("adminuser",adminuser).Error("There was an error when getting user details of freshly registered admin user.")
 		return
 	}
-  err, c := getClientsforRealm(apiUrl,realm,adminuser,adminpassword,t)
+  err, c := getClientsforRealm(apiUrl,realm,adminuser,adminpassword,t, log)
   if err != nil {
-    println("Got error when fetching clients: ", err)
+    log.WithField("realm", realm).WithField("adminuser",adminuser).Error("There was an error when getting clients of realm to set freshly register admin user as an admin.")
 		return
 	}
 
@@ -668,13 +716,14 @@ func registerAdminUser(apiUrl,realm,adminuser,adminpassword string, t BearerToke
   for i := range c {
     if c[i].ClientID == "realm-management" {
         realmManagementClientId = c[i].ID
-      //  println("Found client id for realm-management client of realm ",realm,": ",realmManagementClientId)
+        log.WithField("realm", realm).WithField("adminuser",adminuser).WithField("realm management client",realmManagementClientId).Debug("Found realm management client.")
         break
     }
   }
 
-  comps, err := getComposites(apiUrl,realm,d.ID,realmManagementClientId, t)
+  comps, err := getComposites(apiUrl,realm,d.ID,realmManagementClientId, t, log)
   if err != nil {
+    log.WithField("realm", realm).WithField("adminuser",adminuser).WithField("realm management client",realmManagementClientId).Error("There was an error when getting client composit of realm management client to set freshly register admin user as an admin.")
 		return
 	}
 
@@ -682,25 +731,28 @@ func registerAdminUser(apiUrl,realm,adminuser,adminpassword string, t BearerToke
   for i := range comps {
     if comps[i].Name == "manage-users" {
         comp = comps[i]
-        println("Got manage-users composite")
+        log.WithField("realm", realm).WithField("adminuser",adminuser).WithField("realm management client",realmManagementClientId).Debug("Found manager user composit of realm management client.")
         break
     }
   }
 
-  err = setComposits(apiUrl,realm,d.ID,realmManagementClientId,comp,t)
+  err = setComposits(apiUrl,realm,d.ID,realmManagementClientId,comp,t, log)
+  log.WithField("error",err).WithField("realm", realm).WithField("adminuser",adminuser).WithField("realm management client",realmManagementClientId).Error("There was an error when setting client composit of realm management client to set freshly register admin user as an admin.")
 
   return
 }
 
-func getUserDetails(apiUrl,realm,username string, t BearerToken)(details UserDetails, err error){
+func getUserDetails(apiUrl,realm,username string, t BearerToken, log *logrus.Entry)(details UserDetails, err error){
   client := &http.Client{}
   resource := apiUrl + "/auth/admin/realms/" + realm + "/users?username=" + strings.ToLower(username)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("username",username).Error("There was an error when parsing request uri used to get user details.")
 		return
 	}
-fmt.Println(resource)
+
   req, err := http.NewRequest("GET", resource,nil)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("username",username).Error("There was an error when creating http request to get user details.")
 		return
 	}
   req.Header.Add("Accept", "application/json")
@@ -709,37 +761,38 @@ fmt.Println(resource)
 
   resp, err := client.Do(req)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("username",username).Error("There was an error when triggering http request to get user details.")
 		return
 	}
   defer resp.Body.Close()
-
-  // println("i got a:", resp.Status, " when trying to get details of the user ",username," in realm ", realm)
 
   var users []UserDetails
 
   err = json.NewDecoder(resp.Body).Decode(&users)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("username",username).Error("There was an error when decoding response of http request to get user details.")
 		return
 	}
 
   if len(users) == 0 {
-    println("IDP didn't return any user details for username ", username)
+    log.WithField("realm", realm).WithField("username",username).Error("Keycloak didn't return any user details for username.")
   } else if len(users) > 1 {
-    println("IDP returend more then one user for username ", username)
+    log.WithField("realm", realm).WithField("username",username).Error("Keycloak returned user details for more then one user for username.")
     details = users[0]
   } else {
-    println("IDP returned the details of one user for username ", username)
+    log.WithField("realm", realm).WithField("username",username).Debug("Keycloak returned the user details for username .")
     details = users[0]
   }
 
   return
 }
 
-func getComposites(apiUrl,realm,userID, technicalClientID string, t BearerToken)(composits []Composite, err error){
+func getComposites(apiUrl,realm,userID, technicalClientID string, t BearerToken, log *logrus.Entry)(composits []Composite, err error){
   client := &http.Client{}
   resource := "/auth/admin/realms/" + realm + "/users/" + userID + "/role-mappings/clients/" + technicalClientID + "/available"
   u, err := url.ParseRequestURI(apiUrl)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("technicalClientId",technicalClientID).Error("There was an error when parsing request uri used to get composite of client.")
 		return
 	}
 
@@ -747,6 +800,7 @@ func getComposites(apiUrl,realm,userID, technicalClientID string, t BearerToken)
 
   req, err := http.NewRequest("GET", u.String(),nil)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("technicalClientId",technicalClientID).Error("There was an error when creating http request to get composite of client.")
 		return
 	}
   req.Header.Add("Accept", "application/json")
@@ -755,35 +809,41 @@ func getComposites(apiUrl,realm,userID, technicalClientID string, t BearerToken)
 
   resp, err := client.Do(req)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("technicalClientId",technicalClientID).Error("There was an error when triggering http request to get composite of client.")
 		return
 	}
   defer resp.Body.Close()
 
+  //TODO: Check response code
   //println("i got a:", resp.Status, " when trying to get composits for user ", userID," on realm ", realm, " with client ", technicalClientID)
 
   err = json.NewDecoder(resp.Body).Decode(&composits)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("technicalClientId",technicalClientID).Error("There was an error when decoding response of http request to get composite of client.")
 		return
 	}
 
   return
 }
 
-func setComposits(apiUrl,realm,userID, technicalClientID string, composite Composite, t BearerToken)(err error){
+func setComposits(apiUrl,realm,userID, technicalClientID string, composite Composite, t BearerToken, log *logrus.Entry)(err error){
   client := &http.Client{}
   resource := apiUrl + "/auth/admin/realms/" + realm + "/users/" + userID + "/role-mappings/clients/" + technicalClientID
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("technicalClientID",technicalClientID).Error("There was an error when parsing request uri used to set composite of client.")
 		return
 	}
 
   compositeJson, err := json.Marshal([]Composite{composite})
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("technicalClientID",technicalClientID).WithField("composite",composite).Error("There was an error when encoding body of http request to set composite of client.")
 		return
 	}
 
 
   req, err := http.NewRequest("POST", resource, bytes.NewReader(compositeJson))
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("technicalClientID",technicalClientID).Error("There was an error when creating http request to set composite of client.")
 		return
 	}
   req.Header.Add("Accept", "application/json")
@@ -792,25 +852,29 @@ func setComposits(apiUrl,realm,userID, technicalClientID string, composite Compo
 
   resp, err := client.Do(req)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("technicalClientID",technicalClientID).Error("There was an error when triggering http request to set composite of client.")
 		return
 	}
   defer resp.Body.Close()
 
-  //println("i got a:", resp.Status, " when trying to set user management role for user ", userID, " with realm-management client ",technicalClientID, " on realm ", realm)
+  // TODO: check response code
 
   return
 }
 
 
-func registerRealm(apiUrl, adminuser, adminpassword, domainrealm, domainadminusername, domainadminpassword string)(components []Component, err error){
-  t, err := getBearerToken(apiUrl, adminuser, adminpassword)
+func registerRealm(apiUrl, adminuser, adminpassword, domainrealm, domainadminusername, domainadminpassword string, log *logrus.Entry)(components []Component, err error){
+  // TODO: handover bearer token to function instead of fetching it inside.
+  t, err := getBearerToken(apiUrl, adminuser, adminpassword, log)
   if err != nil {
 		return
 	}
+
   client := &http.Client{}
   resource := "/auth/admin/realms/"
   u, err := url.ParseRequestURI(apiUrl)
   if err != nil {
+    log.WithField("error",err).WithField("realm", domainrealm).Error("There was an error when parsing request uri used to register realm.")
 		return
 	}
   u.Path = resource
@@ -819,6 +883,7 @@ func registerRealm(apiUrl, adminuser, adminpassword, domainrealm, domainadminuse
   realmJson, err := json.Marshal(realm)
   req, err := http.NewRequest("POST", u.String(), bytes.NewReader(realmJson))
 	if err != nil {
+    log.WithField("error",err).WithField("realm", domainrealm).Error("There was an error when creating http request to register realm.")
 		return
 	}
   req.Header.Add("Accept", "application/json")
@@ -827,6 +892,7 @@ func registerRealm(apiUrl, adminuser, adminpassword, domainrealm, domainadminuse
 
   resp, err := client.Do(req)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", domainrealm).Error("There was an error when triggering http request to register realm.")
 		return
 	}
 
@@ -834,32 +900,43 @@ func registerRealm(apiUrl, adminuser, adminpassword, domainrealm, domainadminuse
 
   defer resp.Body.Close()
 
-  err = registerAdminUser(apiUrl, domainrealm, domainadminusername, domainadminpassword, t)
+  err = registerAdminUser(apiUrl, domainrealm, domainadminusername, domainadminpassword, t, log)
   if err != nil {
+    log.WithField("realm", domainrealm).Error("There was an error when registering admin user for newly registered realm.")
 		return
 	}
   return
 }
 
-func adaptClientDefaults(apiUrl,realm string ,c Client, t BearerToken)(err error){
+func adaptClientDefaults(apiUrl,realm string ,c Client, t BearerToken, log *logrus.Entry)(err error){
   httpClient := &http.Client{}
   clientsInfo :=   apiUrl + "/auth/admin/realms/" + realm + "/clients/" + c.ClientID
   c.ServiceAccountsEnabled = true
   c.ImplicitFlowEnabled = true
   c.DirectAccessGrantsEnabled = true
+
   jsonClient, err := json.Marshal(c)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("client",c).Error("There was an error when parsing request uri used to adapt client defaults.")
 		return
 	}
 
   req2, err := http.NewRequest("PUT", clientsInfo, bytes.NewReader(jsonClient))
+  if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("client",c).Error("There was an error when creating http request to adapt client defaults.")
+		return
+	}
+
   req2.Header.Add("Accept", "application/json")
   req2.Header.Add("Authorization","Bearer " + t.AccessToken)
   req2.Header.Add("Content-Type", "application/json;charset=UTF-8")
   resp2, err := httpClient.Do(req2)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("client",c).Error("There was an error when triggering http request to adapt client defaults.")
     return
   }
+
+  // TODO: Check response code
 
   defer resp2.Body.Close()
   return
@@ -894,7 +971,7 @@ func buildTrustedHostComponent(id string, parentId string, hostSendingRegistrati
   return t
 }
 
-func addTrustedHost(apiUrl string,realm string,user string,password string, components []Component,hostSendingRegistrationRequestMustMatch bool,clientUrisMustMatch bool,trusted []string)(resp *http.Response, err error){
+func addTrustedHost(apiUrl string,realm string,user string,password string, components []Component,hostSendingRegistrationRequestMustMatch bool,clientUrisMustMatch bool,trusted []string, log *logrus.Entry)(resp *http.Response, err error){
 
   selected := make([]Component,0)
   for _, v := range components {
@@ -915,9 +992,10 @@ func addTrustedHost(apiUrl string,realm string,user string,password string, comp
   thc := buildTrustedHostComponent(c.ID,c.ParentID,hostSendingRegistrationRequestMustMatch,clientUrisMustMatch,trusted)
 
 
-  // only call if token expired...
-  t, err := getBearerToken(apiUrl,user,password)
+  // TODO: only call if token expired...
+  t, err := getBearerToken(apiUrl,user,password, log)
   if err != nil {
+    log.Error("Failed to fetch bearer token in order to add trusted host.")
 		return
 	}
 
@@ -926,12 +1004,14 @@ func addTrustedHost(apiUrl string,realm string,user string,password string, comp
   resource := "/auth/admin/realms/" + realm + "/components/" + c.ID
   u, err := url.ParseRequestURI(apiUrl)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("trustedHosts",trusted).Error("There was an error when parsing request uri used to add trusted hosts.")
 		return
 	}
   u.Path = resource
 
   json, err := json.Marshal(thc)
   if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("trustedHosts",trusted).Error("There was an error when encoding request body used to add trusted hosts.")
 		return
 	}
 
@@ -945,25 +1025,29 @@ func addTrustedHost(apiUrl string,realm string,user string,password string, comp
 
   resp, err = client.Do(req)
 	if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("trustedHosts",trusted).Error("There was an error when creating http request to add trusted hosts.")
 		return
 	}
   defer resp.Body.Close()
   return
 }
 
-func deleteConsentRequiredPolicy(apiUrl string,realm string,user string,password string, components []Component){
+func deleteConsentRequiredPolicy(apiUrl string,realm string,user string,password string, components []Component, log *logrus.Entry){
   for _, v := range components {
     if v.ProviderID == "consent-required" {
-      resp, err := deleteComponent(apiUrl,realm,user,password,v.ID)
+      resp, err := deleteComponent(apiUrl,realm,user,password,v.ID, log)
       if err != nil {
+        log.WithField("realm",realm).Error("There was an error when deleting consent required policy of realm.")
     		return
-    	}
-      println("Response from consent-required policy delete request: " + resp.Status)
+    	} else {
+        log.WithField("realm",realm).WithField("status",resp.Status).Info("Deleted consent required policy of realm.")
+      }
+      // TODO: Check response code of request resp.Status
     }
   }
 }
 
-func registerFacebookIdentityProvider(apiUrl, realm, clientId, clientSecret string, t BearerToken) (err error) {
+func registerFacebookIdentityProvider(apiUrl, realm, clientId, clientSecret string, t BearerToken, log *logrus.Entry) (err error) {
   facebookProvider := &Provider{
     Alias: "facebook",
     ProviderID: "facebook",
@@ -984,27 +1068,38 @@ func registerFacebookIdentityProvider(apiUrl, realm, clientId, clientSecret stri
       UserIp: ""}}
 
   p, err := json.Marshal(facebookProvider)
+  if err != nil {
+    log.WithField("error",err).WithField("realm",realm).Error("There was an error when marshalling the body to register a facebook identity provider.")
+    return
+  }
 
 	registrationUrl :=  apiUrl + "/auth/admin/realms/" + realm + "/identity-provider/instances"
+  if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when parsing request uri used to register a facebook identity provider.")
+    return
+  }
 
   reqType, err := http.NewRequest("POST", registrationUrl, bytes.NewReader(p))
+  if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when creating http request to register a facebook identity provider.")
+    return
+  }
+
 	reqType.Header.Set("Content-Type", "application/json")
 	reqType.Header.Set("Authorization", "bearer " + t.AccessToken)
 
 	httpClient := &http.Client{}
 	resp, err := httpClient.Do(reqType)
 	if err != nil {
-		fmt.Println("Keycloak REST POST to register facebook identity provider error: ", err)
-		return
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when triggering http request to register a facebook identity provider.")
 	} else {
-    fmt.Println("Successfully registered Facebook Identity Provider.")
+    log.WithField("realm", realm).Info("Successfully registered facebook identity provider.")
   }
-	defer resp.Body.Close()
-
+  defer resp.Body.Close()
 	return
 }
 
-func registerGoogleIdentityProvider(apiUrl, realm, clientId, clientSecret string, t BearerToken) (err error) {
+func registerGoogleIdentityProvider(apiUrl, realm, clientId, clientSecret string, t BearerToken, log *logrus.Entry) (err error) {
   googleProvider := &Provider{
     Alias: "google",
     ProviderID: "google",
@@ -1025,34 +1120,44 @@ func registerGoogleIdentityProvider(apiUrl, realm, clientId, clientSecret string
       UserIp: ""}}
 
   p, err := json.Marshal(googleProvider)
+  if err != nil {
+    log.WithField("error",err).WithField("realm",realm).Error("There was an error when marshalling the body to register a google identity provider.")
+    return
+  }
 
 	registrationUrl :=  apiUrl + "/auth/admin/realms/" + realm + "/identity-provider/instances"
+  if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when parsing request uri used to register a google identity provider.")
+    return
+  }
 
   reqType, err := http.NewRequest("POST", registrationUrl, bytes.NewReader(p))
+  if err != nil {
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when creating http request to register a google identity provider.")
+    return
+  }
+
 	reqType.Header.Set("Content-Type", "application/json")
 	reqType.Header.Set("Authorization", "bearer " + t.AccessToken)
 
 	httpClient := &http.Client{}
 	resp, err := httpClient.Do(reqType)
 	if err != nil {
-		fmt.Println("Keycloak REST POST to register google identity provider error: ", err)
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when triggering http request to register a google identity provider.")
 		return
 	} else {
-    fmt.Println("Successfully registered Google Identity Provider.")
+    log.WithField("realm", realm).Info("Successfully registered google identity provider.")
   }
 	defer resp.Body.Close()
-
 	return
 }
 
-func getRealmConfiguration(apiUrl, realm string, t BearerToken) (err error, config RealmConfig) {
-	fmt.Println("Getting realm configuration of realm ", realm)
+func getRealmConfiguration(apiUrl, realm string, t BearerToken,log *logrus.Entry) (err error, config RealmConfig) {
 
 	keycloakgeturl :=  apiUrl + "/auth/admin/realms/" + realm
-	fmt.Println("URL:>", keycloakgeturl)
 	req, err := http.NewRequest("GET", keycloakgeturl, nil)
   if err != nil {
-		fmt.Println("Got an error when building request: ", err)
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when creating http request to get realm configuration.")
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -1061,21 +1166,20 @@ func getRealmConfiguration(apiUrl, realm string, t BearerToken) (err error, conf
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Println("Keycloak REST GET realm config error: ", err)
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when triggering http request to get realm configuration.")
 		return
 	}
 
   if err := json.NewDecoder(resp.Body).Decode(&config); err != nil {
-		fmt.Println("Keycloak REST json realm config unmarshal error: ", err)
+    log.WithField("error",err).WithField("realm", realm).Error("There was an error when decoding response of http request to get realm configuration.")
 	}
 
   defer resp.Body.Close()
 
 	return nil, config
-
 }
 
-func enableSmtp(apiUrl, realm, host, port, user, password, fromEmailAddress, fromDisplayName, replyToEmailAddress, replyToDisplayName  string, t BearerToken) (err error) {
+func enableSmtp(apiUrl, realm, host, port, user, password, fromEmailAddress, fromDisplayName, replyToEmailAddress, replyToDisplayName  string, t BearerToken,log *logrus.Entry) (err error) {
   smtpconfig := &SmtpConfig{
     Port: port,
     Ssl: "true",
@@ -1089,67 +1193,81 @@ func enableSmtp(apiUrl, realm, host, port, user, password, fromEmailAddress, fro
     ReplyTo: replyToEmailAddress,
     ReplyToDisplayName: replyToEmailAddress}
 
-  err, configuration := getRealmConfiguration(apiUrl, realm, t)
+  err, configuration := getRealmConfiguration(apiUrl, realm, t, log)
   if err != nil {
-		fmt.Println("There was an error when fetching the realm configuration: ", err)
+		log.WithField("realm",realm).WithField("smtpHost",host).Error("There was an error when fetching the realm configuration in order to enable an smtp server.")
 		return
 	}
 
   configuration.SmtpServer = *smtpconfig
 
   c, err := json.Marshal(configuration)
+  if err != nil {
+    log.WithField("realm",realm).WithField("smtpHost",host).Error("There was an error when marshalling body of request to enable smtp.")
+    return
+  }
 
 	realmConfigUrl :=  apiUrl + "/auth/admin/realms/" + realm
 
   reqType, err := http.NewRequest("PUT", realmConfigUrl, bytes.NewReader(c))
+  if err != nil {
+    log.WithField("realm",realm).WithField("smtpHost",host).Error("There was an error when creating http request to enable smtp.")
+    return
+  }
+
 	reqType.Header.Set("Content-Type", "application/json")
 	reqType.Header.Set("Authorization", "bearer " + t.AccessToken)
 
 	httpClient := &http.Client{}
 	resp, err := httpClient.Do(reqType)
 	if err != nil {
-		fmt.Println("Keycloak REST POST to enable SMTP server throw an error: ", err)
-		return
+    log.WithField("realm",realm).WithField("smtpHost",host).Error("There was an error when triggering http request to enable smtp.")
 	} else {
     if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-      fmt.Println("Successfully enabled Smtp Server.")
+      log.WithField("realm",realm).WithField("smtpHost",host).Info("Successfully enabled Smtp Server.")
     } else {
-      fmt.Println("Tried to enable Smtp Server, but got response: ", resp.Status)
+      log.WithField("realm",realm).WithField("smtpHost",host).WithField("statusCode",resp.StatusCode).WithField("status",resp.Status).Info("Tried to enable smtp server but got non-success response.")
     }
   }
 	defer resp.Body.Close()
-
 	return
-
 }
 
-func enableLoginInternationalisation(apiUrl, realm string, supportedLocales []string, t BearerToken) (err error) {
-  err, configuration := getRealmConfiguration(apiUrl, realm, t)
+func enableLoginInternationalisation(apiUrl, realm string, supportedLocales []string, t BearerToken,log *logrus.Entry) (err error) {
+  err, configuration := getRealmConfiguration(apiUrl, realm, t, log)
   if err != nil {
-    fmt.Println("There was an error when fetching the realm configuration: ", err)
+    log.WithField("realm",realm).WithField("supportedLocales",supportedLocales).Error("There was an error when fetching the realm configuration in order to enable internationalisation for Login.")
     return
   }
   configuration.InternationalizationEnabled = true
   configuration.SupportedLocales = supportedLocales
 
   c, err := json.Marshal(configuration)
+  if err != nil {
+    log.WithField("realm",realm).WithField("supportedLocales",supportedLocales).Error("There was an error when marshalling body of request to enable internationalisation for Login.")
+    return
+  }
 
 	realmConfigUrl :=  apiUrl + "/auth/admin/realms/" + realm
 
   reqType, err := http.NewRequest("PUT", realmConfigUrl, bytes.NewReader(c))
+  if err != nil {
+    log.WithField("error",err).WithField("realm", realm).WithField("supportedLocales",supportedLocales).Error("There was an error when creating http request to enable internationalisation.")
+    return
+  }
+
 	reqType.Header.Set("Content-Type", "application/json")
 	reqType.Header.Set("Authorization", "bearer " + t.AccessToken)
 
 	httpClient := &http.Client{}
 	resp, err := httpClient.Do(reqType)
 	if err != nil {
-		fmt.Println("Keycloak REST POST to enable internationalisation for login throw an error: ", err)
-		return
+    log.WithField("error",err).WithField("realm", realm).WithField("supportedLocales",supportedLocales).Error("There was an error when triggering http request to enable internationalisation.")
 	} else {
     if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-      fmt.Println("Successfully enabled internationalisation for login.")
+      log.WithField("realm",realm).WithField("supportedLocales",supportedLocales).Info("Successfully enabled internationalisation.")
     } else {
-      fmt.Println("Tried to enable internationalisation for login, but got response: ", resp.Status)
+      log.WithField("realm",realm).WithField("supportedLocales",supportedLocales).WithField("statusCode",resp.StatusCode).WithField("status",resp.Status).Info("Tried to enable internationalisation but got non-success response.")
     }
   }
 	defer resp.Body.Close()

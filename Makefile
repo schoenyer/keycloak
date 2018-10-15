@@ -16,7 +16,7 @@ all: clean format image
 all_local: clean format image
 
 configurator:
-	rm -rf ./configurator/build & docker run --rm -it -e CGO_ENABLED=0 -v "$(PWD)/configurator":/usr/src/myapp -w /usr/src/myapp golang:1.9-alpine sh -c "apk --no-cache add git make bash gcc musl-dev linux-headers curl && mkdir build && cd ./build && go build -ldflags '-linkmode external -extldflags \"-static\"' -tags netgo ../configurator.go"
+	rm -rf ./configurator/build & docker run --rm -it -e CGO_ENABLED=0 -v "$(PWD)/configurator":/usr/src/myapp -w /usr/src/myapp golang:1.9-alpine sh -c "apk --no-cache add git make bash gcc musl-dev linux-headers curl && go get github.com/sirupsen/logrus && mkdir -p build && cd ./build && go build -ldflags '-linkmode external -extldflags \"-static\"' -tags netgo ../configurator.go"
 
 image: keycloak configurator
 	docker build -t $(URI):$(VERSION) --rm=true --no-cache=true --force-rm=true .
